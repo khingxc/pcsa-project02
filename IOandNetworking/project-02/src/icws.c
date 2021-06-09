@@ -158,36 +158,38 @@ void serve_http(int connFd, char* rootFol) {
     char line[MAXBUF];
     char headr[MAXBUF];
 
-
-    //it causes INFINITE LOOP right here via read part
-
     //===============================================================
     // if (!read(connFd, buffer, MAXBUF))
     //     return;  
     // /* Quit if we can't read the first line */
     
     while (read_line(connFd, line, 8192) > 0){
+
         strcat(buffer, line);
-        printf("%s\n", buffer);
+        // char lastF[3];
+        // strncpy( lastF, &line[strlen(line)-2], 2);
+        //printf("HI, I'M BUFFER: %s\n", buffer);
+        // printf("HI, I'M THE LAST TWO CHARS: %s\n", lastF);
 
-        // char *lastF = substring(line, strlen(line)-5, 4);
-        char lastF[3];
-        strncpy( lastF, &line[strlen(line)-2], 2);
-        printf("this is last 2: %s\n", lastF);
-
-        if (strcmp(lastF, "\r\n") == 0){          // || (strcmp(lastF[strlen(lastF)-1], "\n") == 0)
+        if (strcmp(line, "\r\n") == 0){          
             break;
         }
-        printf("hi, this is buffer: %s\n", buffer);
+        printf("HI, I'M BUFFER: %s\n", buffer);
+
     } 
 
-    printf("im out of LOOP!\n");
+    printf("OUT OF LOOP!\n");
     //===============================================================
 
 
-    Request *req = parse(buffer, MAXBUF, connFd);    //(buffer, MAXBUF, connFd);
+    //IF it's parse(buffer, read_line(connFd, buffer, 8192), connFd), it turns to be somehow like infinite loop(?),
+    //IF it's parse(buffer, MAXBUF, connFd), it will get segmentation fault.
 
-    printf("%s", req);
+    Request *req = parse(buffer, read_line(connFd, buffer, 8192), connFd);    //(buffer, MAXBUF, connFd);
+ 
+    printf("%s", req->http_method);
+    printf("%s", req->http_uri);
+    printf("%s", req->http_version);
 
     if (req == NULL){
 
