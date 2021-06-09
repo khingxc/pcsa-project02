@@ -81,7 +81,7 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
     if (fd < 0){
         sprintf(headr, 
                 "HTTP/1.1 404 not found\r\n"
-                "Server: icws\r\n"
+                "Server: ICWS\r\n"
                 "Connection: close\r\n");
         write_all(connFd, headr, strlen(headr));
         return;
@@ -102,7 +102,7 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
 
     sprintf(headr, 
             "HTTP/1.1 200 OK\r\n"
-            "Server: icws\r\n"
+            "Server: ICWS\r\n"
             "Connection: close\r\n"
             "Content-length: %lu\r\n"
             "Content-type: %s\r\n\r\n", filesize, mimeT(req_obj));
@@ -115,55 +115,17 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
     int fd = open(fileLoc(rootFol, req_obj), O_RDONLY);
 
-    // getHeader(fd, connFd, req_obj);
-
-    // // ====================================
-
-    // struct stat st;
-    // fstat(fd, &st);
-
-    // // ====================================
-
+     // ====================================
 
     struct stat st;
     fstat(fd, &st);
-    size_t filesize = st.st_size;
 
-    char headr[MAXBUF]; // buffer for header
+    // ====================================
 
-    if (fd < 0){
-        sprintf(headr, 
-                "HTTP/1.1 404 not found\r\n"
-                "Server: icws\r\n"
-                "Connection: close\r\n");
-        write_all(connFd, headr, strlen(headr));
-        return;
-    }
+    getHeader(fd, connFd, req_obj);
 
-    if (filesize < 0){
-        printf("Filesize Error\n");
-        close(fd);
-        return;
-    }
-  
-    if (strcmp(mimeT(req_obj), "null") == 0){
-        char * msg = "File type not supported\n";
-        write_all(connFd, msg , strlen(msg) );
-        close(fd);
-        return;
-    }
+    char buf[st.st_size];
 
-    sprintf(headr, 
-            "HTTP/1.1 200 OK\r\n"
-            "Server: icws\r\n"
-            "Connection: close\r\n"
-            "Content-length: %lu\r\n"
-            "Content-type: %s\r\n\r\n", filesize, mimeT(req_obj));
-
-    write_all(connFd, headr, strlen(headr));
-
-    char buf[filesize];
-    // char buf[filesize];
     ssize_t numRead;
     while ((numRead = read(fd, buf, MAXBUF)) > 0) {
         write_all(connFd, buf, numRead);
@@ -172,6 +134,7 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
     if ( (close(fd)) < 0 ){
         printf("Failed to close input file. Meh.\n");
     }    
+
 }
 
 void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
@@ -188,28 +151,50 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
 void serve_http(int connFd, char* rootFol) {
 
+    printf("in serve_http\n");
+
     char buffer[MAXBUF];
+    memset(buffer, '\0', 8192);
     char line[MAXBUF];
     char headr[MAXBUF];
 
-    // if (!read_line(connFd, buffer, MAXBUF))
-    //     return ;  /* Quit if we can't read the first line */
+
+    //it causes INFINITE LOOP right here via read part
+
+    //===============================================================
+    // if (!read(connFd, buffer, MAXBUF))
+    //     return;  
+    // /* Quit if we can't read the first line */
     
-    while (read_line(connFd, line, MAXBUF) > 0){
+    while (read_line(connFd, line, 8192) > 0){
         strcat(buffer, line);
-        if (strcmp(line, "\r\n") == 0){
+        printf("%s\n", buffer);
+
+        // char *lastF = substring(line, strlen(line)-5, 4);
+        char lastF[3];
+        strncpy( lastF, &line[strlen(line)-2], 2);
+        printf("this is last 2: %s\n", lastF);
+
+        if (strcmp(lastF, "\r\n") == 0){          // || (strcmp(lastF[strlen(lastF)-1], "\n") == 0)
             break;
         }
-    } //
+        printf("hi, this is buffer: %s\n", buffer);
+    } 
 
-    Request *req = parse(buffer, MAXBUF, connFd);
+    printf("im out of LOOP!\n");
+    //===============================================================
+
+
+    Request *req = parse(buffer, MAXBUF, connFd);    //(buffer, MAXBUF, connFd);
+
+    printf("%s", req);
 
     if (req == NULL){
 
         printf("LOG: Failling to parse a request");
         sprintf(headr, 
                 "HTTP/1.1 400 Request Parsing Failed\r\n"
-                "Server: icws\r\n"
+                "Server: ICWS\r\n"
                 "Connection: close\r\n");
         return;
 
@@ -231,7 +216,7 @@ void serve_http(int connFd, char* rootFol) {
             printf("LOG: Unknown request\n");
             sprintf(headr, 
                     "HTTP/1.1 501 Method Unimplemented\r\n"
-                    "Server: icws\r\n"
+                    "Server: ICWS\r\n"
                     "Connection: close\r\n");
             write_all(connFd, headr, strlen(headr));
         }
@@ -243,7 +228,7 @@ void serve_http(int connFd, char* rootFol) {
         printf("LOG: Unsupported HTTTP Version");
         sprintf(headr, 
                 "HTTP/1.1 505 HTTP Version Not Supported\r\n"
-                "Server: icws\r\n"
+                "Server: ICWS\r\n"
                 "Connection: close\r\n");
 
         return;
@@ -257,31 +242,37 @@ void serve_http(int connFd, char* rootFol) {
 
 int main(int argc, char* argv[]) {
 
-    // static struct option long_ops[] =
-    // {
-    //     {"port", required_argument, NULL, 'p'},
-    //     {"root", required_argument, NULL, 'r'}, 
-    //     {NULL, 0, NULL, 0}
-    // };
+    //–getopt_long: it causes segmentation fault–
 
-    // int ch;
-    // while ((ch = getopt_long(argc, argv, "p:r:", long_ops, NULL)) != -1){
+    static struct option long_ops[] =
+    {
+        {"port", required_argument, NULL, 'p'},
+        {"root", required_argument, NULL, 'r'}, 
+        {NULL, 0, NULL, 0}
+    };
 
-    //     switch (ch)
-    //     {
+    int ch;
+    while ((ch = getopt_long(argc, argv, "p:r:", long_ops, NULL)) != -1){
 
-    //         case 'p':
-    //             strcpy(port,optarg);
-    //             break;
+        switch (ch)
+        {
+
+            case 'p':
+                printf("port: %s\n", optarg);
+                port = optarg;
+                break;
  
-    //         case 'r':
-    //             strcpy(root,optarg);
-    //             break;
-    //     }
+            case 'r':
+                printf("root: %s\n", optarg);
+                root = optarg;
+                break;
+        }
   
-    // }
+    }
 
-    int listenFd = open_listenfd(argv[1]);
+
+
+    int listenFd = open_listenfd(port);
 
     for (;;) {
         struct sockaddr_storage clientAddr;
@@ -296,10 +287,12 @@ int main(int argc, char* argv[]) {
             printf("Connection from %s:%s\n", hostBuf, svcBuf);
         else
             printf("Connection from ?UNKNOWN?\n");
-                        
+
+        printf("before going into serve_http\n");  
         serve_http(connFd, argv[2]);
         close(connFd);
     }
 
     return 0;
+
 }
