@@ -15,15 +15,34 @@
 /* Rather arbitrary. In real life, be careful with buffer overflow */
 #define MAXBUF 8192
 
-const char *port;
-const char *root;
+char *port;
+char *root;
 
 typedef struct sockaddr SA;
 
+// struct date dt;
+// getdate(&dt);
+// time_t tme;
+// tme = time(NULL);
+// struct tm *tm = localtime(&tme);
+// time_t now;
+
+char* date(){
+    char d[100];
+    time_t t;
+    time(&t);
+
+    struct tm *local = localtime(&t);
+    sprintf(d, "%d/%d/%d", local->tm_mday, local->tm_mon + 1, local->tm_year + 1900);
+    
+    return strdup(d);
+}
+
 char* mimeT(char* req_obj){ //get mime type from the extension
 
-    char *ext = strchr(req_obj, '.') + 1;
+    char *ext = strchr(req_obj, '.') + 1;   //get extension
     char *mimeType;
+    //add while loop checking null
     
     // check extension and get mime type
     if (strcmp(ext, "html") == 0){
@@ -48,7 +67,7 @@ char* mimeT(char* req_obj){ //get mime type from the extension
         mimeType = "null";
     }
 
-    return mimeType;
+    return strdup(mimeType);
 
 }
 
@@ -63,11 +82,20 @@ char* fileLoc(char* rootFol, char* req_obj){ //get file location
     else if (req_obj[0] != '/'){      // add '/' if first char is not '/'
         strcat(loc, "/");   
     }
-    strcat(loc, req_obj);
-    printf(" File location is: %s \n", loc);
+    strcat(loc, req_obj);   //add file afterward
+    // printf("File location is: %s \n", loc);
 
-    return loc;
+    return strdup(loc);
     
+}
+
+char* getFile(char* req_obj){
+
+    if (strcmp(req_obj, "/") == 0){ // if input == / then req_obj = /index
+        req_obj = "/index.html";
+    } 
+    return strdup(req_obj);
+
 }
 
 void getHeader(int fd, int connFd, char* req_obj){ //get header
@@ -77,12 +105,16 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
     size_t filesize = st.st_size;
 
     char headr[MAXBUF]; // buffer for header
+    char* file = getFile(req_obj);
+
+    // printf("int fd from getHeader: %d\n", fd);
 
     if (fd < 0){
         sprintf(headr, 
                 "HTTP/1.1 404 not found\r\n"
+                "Date: %s \r\n"
                 "Server: ICWS\r\n"
-                "Connection: close\r\n");
+                "Connection: close\r\n", date());
         write_all(connFd, headr, strlen(headr));
         return;
     }
@@ -102,10 +134,14 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
 
     sprintf(headr, 
             "HTTP/1.1 200 OK\r\n"
+            "Date: %s \r\n"
             "Server: ICWS\r\n"
             "Connection: close\r\n"
             "Content-length: %lu\r\n"
-            "Content-type: %s\r\n\r\n", filesize, mimeT(req_obj));
+            "Content-type: %s\r\n"
+            "Last-Modified: %s\r\n\r\n", date(), filesize, mimeT(file), ctime(&st.st_mtime), mimeT(req_obj));
+            // , filesize, ctime(&now), mimeT(req_obj));
+            // tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900, filesize, ctime(&st.st_mtime)), mimeT(req_obj));
 
     write_all(connFd, headr, strlen(headr));
 
@@ -113,7 +149,10 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
 
 void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
-    int fd = open(fileLoc(rootFol, req_obj), O_RDONLY);
+    char* fileLocation = fileLoc(rootFol, req_obj);
+    printf("fileLoc from respond_get: %s\n", fileLocation);
+    int fd = open(fileLocation, O_RDONLY);
+    printf("value of fd from respond_get: %d\n", fd);
 
      // ====================================
 
@@ -122,7 +161,9 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
     // ====================================
 
-    getHeader(fd, connFd, req_obj);
+    char* file = getFile(req_obj);
+
+    getHeader(fd, connFd, file);
 
     char buf[st.st_size];
 
@@ -139,11 +180,15 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
 void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
-    int fd = open(fileLoc(rootFol, req_obj), O_RDONLY);
-
-    getHeader(fd, connFd, req_obj);
+    char* fileLocation = fileLoc(rootFol, req_obj);
+    // printf("fileLoc from respond_head: %s\n", fileLocation);
+    int fd = open(fileLocation, O_RDONLY);
+    char* file = getFile(req_obj);
+    getHeader(fd, connFd, file);
+    // printf("value of fd from respond_head: %d\n", fd);
 
     if ( (close(fd)) < 0 ){
+        // printf("value of fd from if close fd in respond_head < 0: %d\n", fd);
         printf("Failed to close input file. Meh.\n");
     }   
 
@@ -151,76 +196,92 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
 void serve_http(int connFd, char* rootFol) {
 
-    printf("in serve_http\n");
+    // printf("in serve_http\n");
 
     char buffer[MAXBUF];
     memset(buffer, '\0', 8192);
     char line[MAXBUF];
     char headr[MAXBUF];
-
-    //===============================================================
-    // if (!read(connFd, buffer, MAXBUF))
-    //     return;  
-    // /* Quit if we can't read the first line */
+    int readLine;
+    char TwopastLine[MAXBUF];
     
-    while (read_line(connFd, line, 8192) > 0){
+    while ((readLine = read(connFd, line, 8192)) > 0){
 
+        // printf("%d\n", readLine);
+        // printf("IN READ LOOP\n");
+        // printf("==================================\n");
         strcat(buffer, line);
-        // char lastF[3];
-        // strncpy( lastF, &line[strlen(line)-2], 2);
-        //printf("HI, I'M BUFFER: %s\n", buffer);
-        // printf("HI, I'M THE LAST TWO CHARS: %s\n", lastF);
-
-        if (strcmp(line, "\r\n") == 0){          
+        char lastTwo[2];
+        strncpy(lastTwo, &line[strlen(line)-2], 2);
+        // printf("LAST TWO CHARS: %s\n", lastTwo);
+        
+        if ((strcmp(line, "\r\n") == 0) && (strcmp(TwopastLine, "\r\n") == 0)){        //*  trying compare the last 4 bytes;
+            // printf("it reaches the end!!!!\n");
             break;
         }
-        printf("HI, I'M BUFFER: %s\n", buffer);
 
-    } 
+        // printf("BUFFER: %s\n", buffer);
+        memset(TwopastLine, '\0', MAXBUF);
+        strcpy(TwopastLine, lastTwo);
+        memset(line, '\0', MAXBUF);
+    }
 
-    printf("OUT OF LOOP!\n");
-    //===============================================================
-
-
-    //IF it's parse(buffer, read_line(connFd, buffer, 8192), connFd), it turns to be somehow like infinite loop(?),
-    //IF it's parse(buffer, MAXBUF, connFd), it will get segmentation fault.
-
-    Request *req = parse(buffer, read_line(connFd, buffer, 8192), connFd);    //(buffer, MAXBUF, connFd);
+    Request *req = parse(buffer, MAXBUF, connFd);    //(buffer, MAXBUF, connFd);
+    // memset(buffer, '\0', MAXBUF);
  
-    printf("%s", req->http_method);
-    printf("%s", req->http_uri);
-    printf("%s", req->http_version);
-
+    // printf("done parsing\n");
+    
     if (req == NULL){
 
         printf("LOG: Failling to parse a request");
         sprintf(headr, 
                 "HTTP/1.1 400 Request Parsing Failed\r\n"
+                "Date: %s \r\n"
+                // "Date: %d/%d/%d\r\n"
                 "Server: ICWS\r\n"
-                "Connection: close\r\n");
+                "Connection: close\r\n\r\n", date());
+                // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
+
+        write_all(connFd, headr, strlen(headr));
+        memset(buffer, '\0', MAXBUF);
+        memset(headr, '\0', MAXBUF);
+        memset(TwopastLine, '\0', MAXBUF);
         return;
 
     }
 
     else if (strcasecmp(req->http_version, "HTTP/1.1") == 0) {
+          
+        // printf("HTTP METHOD: %s\n", req->http_method);
+        // printf("HTTP VERSION: %s\n", req->http_version);
+        // printf("HTTP URI: %s\n", req->http_uri);
 
         if (strcasecmp(req->http_method, "GET") == 0) {
+
             printf("LOG: Running via GET method\n");
             respond_get(connFd, rootFol, req->http_uri);
+
         }
 
         else if (strcasecmp(req->http_method, "HEAD") == 0) {
+
             printf("LOG: Running via HEAD method\n");
             respond_head(connFd, rootFol, req->http_uri);
+
         }
 
         else {
+
             printf("LOG: Unknown request\n");
             sprintf(headr, 
                     "HTTP/1.1 501 Method Unimplemented\r\n"
+                    "Date: %s\r\n"
+                    // "Date: %d/%d/%d\r\n"
                     "Server: ICWS\r\n"
-                    "Connection: close\r\n");
+                    "Connection: close\r\n", date());
+                    // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
             write_all(connFd, headr, strlen(headr));
+        
         }
 
     }
@@ -230,21 +291,53 @@ void serve_http(int connFd, char* rootFol) {
         printf("LOG: Unsupported HTTTP Version");
         sprintf(headr, 
                 "HTTP/1.1 505 HTTP Version Not Supported\r\n"
+                // "Date: %d/%d/%d\r\n"
                 "Server: ICWS\r\n"
                 "Connection: close\r\n");
-
+                // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
+        write_all(connFd, headr, strlen(headr));
+        free(req->headers);
+        free(req);
+        memset(buffer, '\0', MAXBUF);
+        memset(headr, '\0', MAXBUF);
+        memset(TwopastLine, '\0', MAXBUF);
         return;
 
     } 
 
     free(req->headers);
     free(req);
+    memset(buffer, '\0', MAXBUF);
+    memset(headr, '\0', MAXBUF);
+    memset(TwopastLine, '\0', MAXBUF);
 
 }
 
-int main(int argc, char* argv[]) {
+struct survival_bag {
 
-    //–getopt_long: it causes segmentation fault–
+    struct sockaddr_storage clientAddr;
+    int connFd;
+
+};
+
+char* dirName;
+
+// void* conn_handler(void *args) {
+
+//     struct survival_bag *context = (struct survival_bag *) args;
+    
+//     pthread_detach(pthread_self());
+//     serve_http(context->connFd, dirName);
+
+//     close(context->connFd);
+    
+//     free(context); /* Done, get rid of our survival bag */
+
+//     return NULL; /* Nothing meaningful to return */
+
+// }
+
+int main(int argc, char* argv[]) {
 
     static struct option long_ops[] =
     {
@@ -263,16 +356,15 @@ int main(int argc, char* argv[]) {
                 printf("port: %s\n", optarg);
                 port = optarg;
                 break;
- 
+
             case 'r':
                 printf("root: %s\n", optarg);
                 root = optarg;
                 break;
+
         }
   
     }
-
-
 
     int listenFd = open_listenfd(port);
 
@@ -283,6 +375,12 @@ int main(int argc, char* argv[]) {
         int connFd = accept(listenFd, (SA *) &clientAddr, &clientLen);
         if (connFd < 0) { fprintf(stderr, "Failed to accept\n"); continue; }
 
+        // struct survival_bag *context = 
+        //             (struct survival_bag *) malloc(sizeof(struct survival_bag));
+        // context->connFd = connFd;
+        
+        // memcpy(&context->clientAddr, &clientAddr, sizeof(struct sockaddr_storage));
+
         char hostBuf[MAXBUF], svcBuf[MAXBUF];
         if (getnameinfo((SA *) &clientAddr, clientLen, 
                         hostBuf, MAXBUF, svcBuf, MAXBUF, 0) == 0) 
@@ -290,11 +388,45 @@ int main(int argc, char* argv[]) {
         else
             printf("Connection from ?UNKNOWN?\n");
 
-        printf("before going into serve_http\n");  
-        serve_http(connFd, argv[2]);
+        //pthread_create(&threadInfo, NULL, conn_handler, (void *) context);
+
+        serve_http(connFd, root);
         close(connFd);
+
+
     }
 
     return 0;
 
 }
+
+
+/*
+Progress Checking Point
+
+MILESTONE 1
+- Add Date and Last Modified Time
+- Already fix reading part but more bugs to fix ;–;
+
+MILESTONE 2
+- Already copied the survival back and thread pull from micro_cc; CHECKED
+
+*/
+
+/*
+Bugs:
+
+- After one bad command, it all returns to be bad command/ getting bug. :|
+- GET / HTTP/1.1
+- HTTP version failed 
+
+*/
+
+
+
+/*
+References
+
+* https://www.techiedelight.com/print-current-date-and-time-in-c/
+
+*/
