@@ -1,33 +1,52 @@
-#include<sys/types.h>
-#include<sys/socket.h>
-#include<sys/stat.h>
-#include<netdb.h>
-#include<stdio.h>
-#include<stdlib.h>
-#include<string.h>
-#include<unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
 #include <getopt.h>
+#include <poll.h>
+#include <pthread.h>
 #include "parse.h"
 #include "pcsa_net.h"
 
-/* Rather arbitrary. In real life, be careful with buffer overflow */
+//define items
+//============================
 #define MAXBUF 8192
+#define THREAD_POOL_SIZE 100
+#define PERSISTENT 1
+#define CLOSE 0
+//============================
 
+//argument variables
+//==================
 char *port;
 char *root;
+char *numThreads;
+char *timeout;
+//==================
 
+
+//thread part
+//============================================
+int num_thread;
+
+typedef struct sockaddr_in SA_IN;
 typedef struct sockaddr SA;
 
-// struct date dt;
-// getdate(&dt);
-// time_t tme;
-// tme = time(NULL);
-// struct tm *tm = localtime(&tme);
-// time_t now;
+pthread_t thread_pool[THREAD_POOL_SIZE];
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t parse_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond_var = PTHREAD_COND_INITIALIZER;
+//============================================
 
-char* date(){
+
+char* date(){       //get date function
+
     char d[100];
     time_t t;
     time(&t);
@@ -36,13 +55,13 @@ char* date(){
     sprintf(d, "%d/%d/%d", local->tm_mday, local->tm_mon + 1, local->tm_year + 1900);
     
     return strdup(d);
+
 }
 
 char* mimeT(char* req_obj){ //get mime type from the extension
 
     char *ext = strchr(req_obj, '.') + 1;   //get extension
     char *mimeType;
-    //add while loop checking null
     
     // check extension and get mime type
     if (strcmp(ext, "html") == 0){
@@ -83,13 +102,12 @@ char* fileLoc(char* rootFol, char* req_obj){ //get file location
         strcat(loc, "/");   
     }
     strcat(loc, req_obj);   //add file afterward
-    // printf("File location is: %s \n", loc);
 
     return strdup(loc);
     
 }
 
-char* getFile(char* req_obj){
+char* getFile(char* req_obj){   //get the real file (incase there is a / comes);
 
     if (strcmp(req_obj, "/") == 0){ // if input == / then req_obj = /index
         req_obj = "/index.html";
@@ -106,8 +124,6 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
 
     char headr[MAXBUF]; // buffer for header
     char* file = getFile(req_obj);
-
-    // printf("int fd from getHeader: %d\n", fd);
 
     if (fd < 0){
         sprintf(headr, 
@@ -140,8 +156,6 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
             "Content-length: %lu\r\n"
             "Content-type: %s\r\n"
             "Last-Modified: %s\r\n\r\n", date(), filesize, mimeT(file), ctime(&st.st_mtime), mimeT(req_obj));
-            // , filesize, ctime(&now), mimeT(req_obj));
-            // tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900, filesize, ctime(&st.st_mtime)), mimeT(req_obj));
 
     write_all(connFd, headr, strlen(headr));
 
@@ -163,6 +177,10 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
     char* file = getFile(req_obj);
 
+    printf("before calling get header\n");
+    printf("fd: %d\n", fd);
+    printf("connFd: %d\n", connFd);
+    printf("file: %s\n", file);
     getHeader(fd, connFd, file);
 
     char buf[st.st_size];
@@ -181,14 +199,11 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
     char* fileLocation = fileLoc(rootFol, req_obj);
-    // printf("fileLoc from respond_head: %s\n", fileLocation);
     int fd = open(fileLocation, O_RDONLY);
     char* file = getFile(req_obj);
     getHeader(fd, connFd, file);
-    // printf("value of fd from respond_head: %d\n", fd);
 
     if ( (close(fd)) < 0 ){
-        // printf("value of fd from if close fd in respond_head < 0: %d\n", fd);
         printf("Failed to close input file. Meh.\n");
     }   
 
@@ -196,7 +211,7 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
 void serve_http(int connFd, char* rootFol) {
 
-    // printf("in serve_http\n");
+    printf("**calling serve_http**\n");
 
     char buffer[MAXBUF];
     memset(buffer, '\0', 8192);
@@ -207,29 +222,27 @@ void serve_http(int connFd, char* rootFol) {
     
     while ((readLine = read(connFd, line, 8192)) > 0){
 
-        // printf("%d\n", readLine);
-        // printf("IN READ LOOP\n");
-        // printf("==================================\n");
         strcat(buffer, line);
         char lastTwo[2];
         strncpy(lastTwo, &line[strlen(line)-2], 2);
-        // printf("LAST TWO CHARS: %s\n", lastTwo);
         
-        if ((strcmp(line, "\r\n") == 0) && (strcmp(TwopastLine, "\r\n") == 0)){        //*  trying compare the last 4 bytes;
-            // printf("it reaches the end!!!!\n");
+        if ((strcmp(line, "\r\n") == 0) && (strcmp(TwopastLine, "\r\n") == 0)){       
             break;
         }
 
-        // printf("BUFFER: %s\n", buffer);
         memset(TwopastLine, '\0', MAXBUF);
         strcpy(TwopastLine, lastTwo);
         memset(line, '\0', MAXBUF);
+
     }
 
-    Request *req = parse(buffer, MAXBUF, connFd);    //(buffer, MAXBUF, connFd);
-    // memset(buffer, '\0', MAXBUF);
- 
-    // printf("done parsing\n");
+    pthread_mutex_lock(&parse_mutex);
+
+    //parser is not thread safe, so we have to lock the process right here. 
+    Request *req = parse(buffer, MAXBUF, connFd);  
+    printf("After calling parse\n");
+
+    pthread_mutex_unlock(&parse_mutex); 
     
     if (req == NULL){
 
@@ -237,10 +250,8 @@ void serve_http(int connFd, char* rootFol) {
         sprintf(headr, 
                 "HTTP/1.1 400 Request Parsing Failed\r\n"
                 "Date: %s \r\n"
-                // "Date: %d/%d/%d\r\n"
                 "Server: ICWS\r\n"
                 "Connection: close\r\n\r\n", date());
-                // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
 
         write_all(connFd, headr, strlen(headr));
         memset(buffer, '\0', MAXBUF);
@@ -251,10 +262,13 @@ void serve_http(int connFd, char* rootFol) {
     }
 
     else if (strcasecmp(req->http_version, "HTTP/1.1") == 0) {
-          
-        // printf("HTTP METHOD: %s\n", req->http_method);
-        // printf("HTTP VERSION: %s\n", req->http_version);
-        // printf("HTTP URI: %s\n", req->http_uri);
+
+        printf("method: %s\n", req->http_method);
+        printf("version: %s\n", req->http_version);
+        printf("uri: %s\n", req->http_uri);
+
+        printf("connFd: %d\n", connFd);
+        printf("rootFol: %s\n", rootFol);
 
         if (strcasecmp(req->http_method, "GET") == 0) {
 
@@ -276,10 +290,8 @@ void serve_http(int connFd, char* rootFol) {
             sprintf(headr, 
                     "HTTP/1.1 501 Method Unimplemented\r\n"
                     "Date: %s\r\n"
-                    // "Date: %d/%d/%d\r\n"
                     "Server: ICWS\r\n"
                     "Connection: close\r\n", date());
-                    // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
             write_all(connFd, headr, strlen(headr));
         
         }
@@ -288,13 +300,11 @@ void serve_http(int connFd, char* rootFol) {
 
     else{
 
-        printf("LOG: Unsupported HTTTP Version");
+        printf("LOG: Unsupported HTTP Version\n");
         sprintf(headr, 
                 "HTTP/1.1 505 HTTP Version Not Supported\r\n"
-                // "Date: %d/%d/%d\r\n"
                 "Server: ICWS\r\n"
                 "Connection: close\r\n");
-                // , tm.tm_mday, tm.tm_mon+1, tm.tm_year+1900);
         write_all(connFd, headr, strlen(headr));
         free(req->headers);
         free(req);
@@ -320,46 +330,153 @@ struct survival_bag {
 
 };
 
-char* dirName;
+void* conn_handler(void *args) {
 
-// void* conn_handler(void *args) {
+    printf("*calling conn_handler*\n");
+    printf("agrs: %x\n", args);
 
-//     struct survival_bag *context = (struct survival_bag *) args;
+    struct survival_bag *context = (struct survival_bag *) args;
+    // int connection = PERSISTENT;
     
-//     pthread_detach(pthread_self());
-//     serve_http(context->connFd, dirName);
+    // while(connection == PERSISTENT){
+    //     connection = serve_http(context->connFd, dirName);
+    // }   
 
-//     close(context->connFd);
+    // pthread_detach(pthread_self());
+    serve_http(context->connFd, root);
+
+    close(context->connFd);
     
-//     free(context); /* Done, get rid of our survival bag */
+    free(context); /* Done, get rid of our survival bag */
 
-//     return NULL; /* Nothing meaningful to return */
+    return NULL; /* Nothing meaningful to return */
 
-// }
+}
 
+//NODE Part
+// =======================================================
+
+struct node{
+    struct node* next;
+    struct survival_bag *context;
+};
+typedef struct node node_t;
+
+node_t* head = NULL;
+node_t* tail = NULL;
+
+void enqueue(struct survival_bag *context) { 
+   node_t *newNode = malloc(sizeof(node_t));
+   newNode->context = context;
+   newNode->next = NULL;
+
+   if (tail == NULL){
+       head = newNode;
+   } 
+
+   else{
+       tail->next = newNode;
+   }
+   tail = newNode;
+}
+
+struct survival_bag* dequeue() {
+
+    if (head == NULL){
+        return NULL;
+    }
+
+    else{
+
+        struct survival_bag *result = head->context;
+        // node_t *tmp = head;
+        if (head == NULL){
+            tail = NULL;
+        }
+        // free(tmp);
+        return result;
+
+    }
+
+}
+
+// =======================================================
+
+void* runThread(void *args){
+
+    for (;;) {
+        
+
+        int *pclient = dequeue();
+        int toCheck = 0;
+
+        pthread_mutex_lock(&mutex);
+
+        //**********************************
+
+        if ((pclient) == NULL){
+            pthread_cond_wait(&cond_var, &mutex);
+            //****************************
+            //how to make sure that it gets what it wants????
+
+            //why need this kinda flag?
+            toCheck = 1;
+        }
+
+        pthread_mutex_unlock(&mutex);
+
+        if (toCheck == 0) {
+            conn_handler(pclient);
+        }
+
+    }
+
+} 
+ 
+int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+ 
 int main(int argc, char* argv[]) {
+
+    pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_init(&parse_mutex, NULL);
+    pthread_cond_init(&cond_var, NULL);
 
     static struct option long_ops[] =
     {
         {"port", required_argument, NULL, 'p'},
         {"root", required_argument, NULL, 'r'}, 
+        {"numThreads", required_argument, NULL, 'n'}, 
+        {"timeout", required_argument, NULL, 't'}, 
         {NULL, 0, NULL, 0}
     };
 
     int ch;
-    while ((ch = getopt_long(argc, argv, "p:r:", long_ops, NULL)) != -1){
+    while ((ch = getopt_long(argc, argv, "p:r:n:t:", long_ops, NULL)) != -1){
 
         switch (ch)
+
         {
 
             case 'p':
+
                 printf("port: %s\n", optarg);
                 port = optarg;
                 break;
 
             case 'r':
+
                 printf("root: %s\n", optarg);
                 root = optarg;
+                break;
+
+            case 'n':
+                printf("numThreads: %s\n", optarg);
+                numThreads = optarg;
+                break;
+
+            case 't':
+                printf("timeout: %s\n", optarg);
+                timeout = optarg;
                 break;
 
         }
@@ -367,19 +484,39 @@ int main(int argc, char* argv[]) {
     }
 
     int listenFd = open_listenfd(port);
+    num_thread = atoi(numThreads);
+
+    //Thread Creation
+    //=======================================================================
+    for (int i = 0; i < num_thread; i++){
+
+        if (pthread_create(&thread_pool[i], NULL, runThread, NULL) != 0){
+            printf("Creating Thread failed\n");
+        }
+
+    }
+    //=======================================================================
 
     for (;;) {
+
         struct sockaddr_storage clientAddr;
         socklen_t clientLen = sizeof(struct sockaddr_storage);
+        pthread_t threadInfo;
 
         int connFd = accept(listenFd, (SA *) &clientAddr, &clientLen);
-        if (connFd < 0) { fprintf(stderr, "Failed to accept\n"); continue; }
 
-        // struct survival_bag *context = 
-        //             (struct survival_bag *) malloc(sizeof(struct survival_bag));
-        // context->connFd = connFd;
+        if (connFd < 0) { 
+
+            fprintf(stderr, "Failed to accept\n"); 
+            continue; 
+            
+        }
+
+        struct survival_bag *context = 
+                    (struct survival_bag *) malloc(sizeof(struct survival_bag));
+        context->connFd = connFd;
         
-        // memcpy(&context->clientAddr, &clientAddr, sizeof(struct sockaddr_storage));
+        memcpy(&context->clientAddr, &clientAddr, sizeof(struct sockaddr_storage));
 
         char hostBuf[MAXBUF], svcBuf[MAXBUF];
         if (getnameinfo((SA *) &clientAddr, clientLen, 
@@ -388,11 +525,18 @@ int main(int argc, char* argv[]) {
         else
             printf("Connection from ?UNKNOWN?\n");
 
-        //pthread_create(&threadInfo, NULL, conn_handler, (void *) context);
+        // int *pclient = malloc(sizeof(int));
+        // *pclient = client_socket;
 
-        serve_http(connFd, root);
-        close(connFd);
+        pthread_mutex_lock(&mutex);
+        enqueue(context);
+        pthread_cond_signal(&cond_var);
+        pthread_mutex_unlock(&mutex);
 
+        // pthread_create(&threadInfo, NULL, conn_handler, (void *) context);
+
+        // serve_http(connFd, root);
+        // close(connFd);
 
     }
 
@@ -403,10 +547,6 @@ int main(int argc, char* argv[]) {
 
 /*
 Progress Checking Point
-
-MILESTONE 1
-- Add Date and Last Modified Time
-- Already fix reading part but more bugs to fix ;–;
 
 MILESTONE 2
 - Already copied the survival back and thread pull from micro_cc; CHECKED
@@ -428,5 +568,7 @@ Bugs:
 References
 
 * https://www.techiedelight.com/print-current-date-and-time-in-c/
+* https://www.youtube.com/playlist?list=PL9IEJIKnBJjH_zM5LnovnoaKlXML5qh17
+
 
 */
