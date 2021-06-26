@@ -14,36 +14,48 @@
 #include "parse.h"
 #include "pcsa_net.h"
 
-//define items
+//variables & threads set up
+
 //============================
+
 #define MAXBUF 8192
 #define THREAD_POOL_SIZE 100
 #define PERSISTENT 1
 #define CLOSE 0
+
 //============================
 
-//argument variables
-//==================
 char *port;
 char *root;
 char *numThreads;
 char *timeout;
-//==================
 
+//================
 
-//thread part
-//============================================
 int num_thread;
 
 typedef struct sockaddr_in SA_IN;
 typedef struct sockaddr SA;
 
-pthread_t thread_pool[THREAD_POOL_SIZE];
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_t thread_pool[THREAD_POOL_SIZE];                   
+
+pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t parse_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond_var = PTHREAD_COND_INITIALIZER;
-//============================================
 
+//===========================================================
+
+struct survival_bag {
+
+    struct sockaddr_storage clientAddr;
+    int connFd;
+
+};
+
+int req_count = 0;
+struct survival_bag req_queue[300];
+
+//===========================================================
 
 char* date(){       //get date function
 
@@ -209,7 +221,9 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
 }
 
-void serve_http(int connFd, char* rootFol) {
+int serve_http(int connFd, char* rootFol) {
+
+    int persistantCheck = CLOSE;
 
     printf("**calling serve_http**\n");
 
@@ -217,32 +231,58 @@ void serve_http(int connFd, char* rootFol) {
     memset(buffer, '\0', 8192);
     char line[MAXBUF];
     char headr[MAXBUF];
+    char lastFour[5];
     int readLine;
-    char TwopastLine[MAXBUF];
-    
+
+    struct pollfd fds[1];
+    int timeOut, pret;
+    timeOut = atoi(timeout);
+
+    fds[0].fd = connFd;
+    fds[0].events = 0;
+    fds[0].events |= POLLIN;
+
+    pret = poll(fds, 1, timeOut);
+
+    if (pret == 0){
+        sprintf(headr, 
+                "HTTP/1.1 408 Request Timeout Error\r\n"
+                "Date: %s \r\n"
+                "Server: ICWS\r\n"
+                "Connection: close\r\n\r\n", date());
+
+        write_all(connFd, headr, strlen(headr));
+    }
+
+    else{
+
+    printf("before read while loop\n");
     while ((readLine = read(connFd, line, 8192)) > 0){
 
+        printf("in while loop\n");
+
         strcat(buffer, line);
-        char lastTwo[2];
-        strncpy(lastTwo, &line[strlen(line)-2], 2);
+        memset(lastFour, '\0', 5);
+        strncpy(lastFour, &buffer[strlen(buffer)-4], 4);
+
+        printf("line: %s\n", line);
         
-        if ((strcmp(line, "\r\n") == 0) && (strcmp(TwopastLine, "\r\n") == 0)){       
+        if ((strcmp(lastFour, "\r\n\r\n") == 0) || (strcmp(line, "\r\n") == 0)){  
+            printf("found!!!\n");     
             break;
         }
 
-        memset(TwopastLine, '\0', MAXBUF);
-        strcpy(TwopastLine, lastTwo);
         memset(line, '\0', MAXBUF);
 
     }
-
-    pthread_mutex_lock(&parse_mutex);
+    printf("done reading, before mutex lock and parsing");
 
     //parser is not thread safe, so we have to lock the process right here. 
+    //=====================================================
+    pthread_mutex_lock(&parse_mutex);
     Request *req = parse(buffer, MAXBUF, connFd);  
-    printf("After calling parse\n");
-
     pthread_mutex_unlock(&parse_mutex); 
+    //=====================================================
     
     if (req == NULL){
 
@@ -256,7 +296,6 @@ void serve_http(int connFd, char* rootFol) {
         write_all(connFd, headr, strlen(headr));
         memset(buffer, '\0', MAXBUF);
         memset(headr, '\0', MAXBUF);
-        memset(TwopastLine, '\0', MAXBUF);
         return;
 
     }
@@ -269,6 +308,16 @@ void serve_http(int connFd, char* rootFol) {
 
         printf("connFd: %d\n", connFd);
         printf("rootFol: %s\n", rootFol);
+
+        for(int i = 0; i < req->header_count; i++){
+            if ((strcmp(req->headers[i].header_name, "Connection") == 0)||(strcmp(req->headers[i].header_name, "connection") == 0)){
+                if (strcmp(req->headers[i].header_value, "keep-alive") == 0){
+                    persistantCheck = PERSISTENT;
+                    break;
+                }
+            }
+            
+        }
 
         if (strcasecmp(req->http_method, "GET") == 0) {
 
@@ -310,7 +359,6 @@ void serve_http(int connFd, char* rootFol) {
         free(req);
         memset(buffer, '\0', MAXBUF);
         memset(headr, '\0', MAXBUF);
-        memset(TwopastLine, '\0', MAXBUF);
         return;
 
     } 
@@ -319,115 +367,41 @@ void serve_http(int connFd, char* rootFol) {
     free(req);
     memset(buffer, '\0', MAXBUF);
     memset(headr, '\0', MAXBUF);
-    memset(TwopastLine, '\0', MAXBUF);
+
+    }
+
+    return persistantCheck;
 
 }
 
-struct survival_bag {
-
-    struct sockaddr_storage clientAddr;
-    int connFd;
-
-};
-
-void* conn_handler(void *args) {
+void* conn_handler(struct survival_bag* req) {
 
     printf("*calling conn_handler*\n");
-    printf("agrs: %x\n", args);
-
-    struct survival_bag *context = (struct survival_bag *) args;
-    // int connection = PERSISTENT;
     
-    // while(connection == PERSISTENT){
-    //     connection = serve_http(context->connFd, dirName);
-    // }   
-
-    // pthread_detach(pthread_self());
-    serve_http(context->connFd, root);
-
-    close(context->connFd);
-    
-    free(context); /* Done, get rid of our survival bag */
-
-    return NULL; /* Nothing meaningful to return */
+    while(serve_http(req->connFd, root) == PERSISTENT){
+        
+    }   
+    close(req->connFd);
+    return NULL; 
 
 }
-
-//NODE Part
-// =======================================================
-
-struct node{
-    struct node* next;
-    struct survival_bag *context;
-};
-typedef struct node node_t;
-
-node_t* head = NULL;
-node_t* tail = NULL;
-
-void enqueue(struct survival_bag *context) { 
-   node_t *newNode = malloc(sizeof(node_t));
-   newNode->context = context;
-   newNode->next = NULL;
-
-   if (tail == NULL){
-       head = newNode;
-   } 
-
-   else{
-       tail->next = newNode;
-   }
-   tail = newNode;
-}
-
-struct survival_bag* dequeue() {
-
-    if (head == NULL){
-        return NULL;
-    }
-
-    else{
-
-        struct survival_bag *result = head->context;
-        // node_t *tmp = head;
-        if (head == NULL){
-            tail = NULL;
-        }
-        // free(tmp);
-        return result;
-
-    }
-
-}
-
-// =======================================================
 
 void* runThread(void *args){
 
     for (;;) {
-        
 
-        int *pclient = dequeue();
-        int toCheck = 0;
-
-        pthread_mutex_lock(&mutex);
-
-        //**********************************
-
-        if ((pclient) == NULL){
-            pthread_cond_wait(&cond_var, &mutex);
-            //****************************
-            //how to make sure that it gets what it wants????
-
-            //why need this kinda flag?
-            toCheck = 1;
+        struct survival_bag req;
+        pthread_mutex_lock(&queue_mutex);
+        while (req_count == 0){
+            pthread_cond_wait(&cond_var, &queue_mutex);
         }
-
-        pthread_mutex_unlock(&mutex);
-
-        if (toCheck == 0) {
-            conn_handler(pclient);
+        req = req_queue[0];
+        for (int i = 0; i < req_count - 1; i++){
+            req_queue[i] = req_queue[i+1];
         }
+        req_count--;
+        pthread_mutex_unlock(&queue_mutex);
+        conn_handler(&req);
 
     }
 
@@ -437,9 +411,12 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout);
  
 int main(int argc, char* argv[]) {
 
-    pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_init(&queue_mutex, NULL);
     pthread_mutex_init(&parse_mutex, NULL);
     pthread_cond_init(&cond_var, NULL);
+
+    //=======================================================================================
+    //get values of each input; port, root, numThreads, timeout
 
     static struct option long_ops[] =
     {
@@ -483,18 +460,24 @@ int main(int argc, char* argv[]) {
   
     }
 
+    //=======================================================================
+
     int listenFd = open_listenfd(port);
     num_thread = atoi(numThreads);
 
-    //Thread Creation
     //=======================================================================
+
+    //Thread Creation
     for (int i = 0; i < num_thread; i++){
+
+        printf("thread %d created\n", i);
 
         if (pthread_create(&thread_pool[i], NULL, runThread, NULL) != 0){
             printf("Creating Thread failed\n");
         }
 
     }
+
     //=======================================================================
 
     for (;;) {
@@ -525,18 +508,25 @@ int main(int argc, char* argv[]) {
         else
             printf("Connection from ?UNKNOWN?\n");
 
-        // int *pclient = malloc(sizeof(int));
-        // *pclient = client_socket;
 
-        pthread_mutex_lock(&mutex);
-        enqueue(context);
+        pthread_mutex_lock(&queue_mutex);
+        printf("lock and add request to queue\n");
+        req_queue[req_count] = *context;
+        req_count++;
+        pthread_mutex_unlock(&queue_mutex);
         pthread_cond_signal(&cond_var);
-        pthread_mutex_unlock(&mutex);
 
-        // pthread_create(&threadInfo, NULL, conn_handler, (void *) context);
+        for (int i = 0; i < num_thread; i++) {
 
-        // serve_http(connFd, root);
-        // close(connFd);
+            if (pthread_join(thread_pool[i], NULL) != 0) {
+                perror("Failed to join the thread");
+            }
+
+        }
+
+        pthread_mutex_destroy(&queue_mutex);
+        pthread_mutex_destroy(&parse_mutex);
+        pthread_cond_destroy(&cond_var);
 
     }
 
@@ -544,31 +534,41 @@ int main(int argc, char* argv[]) {
 
 }
 
+//=====================================================================================
 
 /*
 Progress Checking Point
 
 MILESTONE 2
-- Already copied the survival back and thread pull from micro_cc; CHECKED
+
+- persistant; check close in request
+
+MILESTONE 3
 
 */
+
+//=====================================================================================
 
 /*
 Bugs:
 
-- After one bad command, it all returns to be bad command/ getting bug. :|
-- GET / HTTP/1.1
-- HTTP version failed 
+* everything meh :|
+* curl: (52) Empty reply from server
 
 */
 
-
+//=====================================================================================
 
 /*
 References
 
 * https://www.techiedelight.com/print-current-date-and-time-in-c/
 * https://www.youtube.com/playlist?list=PL9IEJIKnBJjH_zM5LnovnoaKlXML5qh17
+* https://www.youtube.com/watch?v=_n2hE2gyPxU
+* https://code-vault.net/lesson/j62v2novkv:1609958966824 
+* https://www.youtube.com/watch?v=UP6B324Qh5k&t=2s
 
 
 */
+
+//=====================================================================================

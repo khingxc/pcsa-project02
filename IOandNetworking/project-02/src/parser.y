@@ -210,7 +210,7 @@ request_header: token ows t_colon ows text ows t_crlf {
     strcpy(parsing_request->headers[parsing_request->header_count].header_name, $1);
 	strcpy(parsing_request->headers[parsing_request->header_count].header_value, $5);
 	parsing_request->header_count++;
-};			  
+};	
 
 /*
  * TODO: You need to fill this rule, and you are done! You have all the
@@ -220,7 +220,7 @@ request_header: token ows t_colon ows text ows t_crlf {
  */
 
 send_head: request_header{
-	YPRINTF("parsing_request: Matched Success.\n");
+ 	YPRINTF("parsing_request: Matched Success.\n");
 	return SUCCESS;
  } |
 request_header send_head{
