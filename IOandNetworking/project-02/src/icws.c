@@ -29,6 +29,7 @@ char *port;
 char *root;
 char *numThreads;
 char *timeout;
+char *cgi;
 
 //================
 
@@ -197,12 +198,14 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
     char buf[st.st_size];
 
+    write_all(connFd, buf, strlen(buf));
+
     ssize_t numRead;
     while ((numRead = read(fd, buf, MAXBUF)) > 0) {
         write_all(connFd, buf, numRead);
     }
 
-    if ( (close(fd)) < 0 ){
+    if ((close(fd)) < 0){
         printf("Failed to close input file. Meh.\n");
     }    
 
@@ -213,7 +216,14 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
     char* fileLocation = fileLoc(rootFol, req_obj);
     int fd = open(fileLocation, O_RDONLY);
     char* file = getFile(req_obj);
+
+    struct stat st;
+    fstat(fd, &st);
+    char buf[st.st_size];
+
     getHeader(fd, connFd, file);
+
+    write_all(connFd, buf, strlen(buf));
 
     if ( (close(fd)) < 0 ){
         printf("Failed to close input file. Meh.\n");
@@ -221,9 +231,28 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
 
 }
 
+// void respond_post(int connFd, char* rootFol, char* req_obj){
+
+// /*
+//    The POST method is used to request the script perform processing and
+//    produce a document based on the data in the request message-body, in
+//    addition to meta-variable values.  A common use is form submission in
+//    HTML [18], intended to initiate processing by the script that has a
+//    permanent affect, such a change in a database.
+
+//    The script MUST check the value of the CONTENT_LENGTH variable before
+//    reading the attached message-body, and SHOULD check the CONTENT_TYPE
+//    value before processing it.
+// */
+
+
+// }
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+
 int serve_http(int connFd, char* rootFol) {
 
-    int persistantCheck = CLOSE;
+    int persistantCheck = PERSISTENT;
 
     printf("**calling serve_http**\n");
 
@@ -252,6 +281,7 @@ int serve_http(int connFd, char* rootFol) {
                 "Connection: close\r\n\r\n", date());
 
         write_all(connFd, headr, strlen(headr));
+        persistantCheck = CLOSE;
     }
 
     else{
@@ -267,15 +297,15 @@ int serve_http(int connFd, char* rootFol) {
 
         printf("line: %s\n", line);
         
-        if ((strcmp(lastFour, "\r\n\r\n") == 0) || (strcmp(line, "\r\n") == 0)){  
-            printf("found!!!\n");     
+        if ((strcmp(lastFour, "\r\n\r\n") == 0) || (strcmp(line, "\r\n") == 0)){     
             break;
         }
 
         memset(line, '\0', MAXBUF);
 
     }
-    printf("done reading, before mutex lock and parsing");
+
+    printf("done reading, before mutex lock and parsing\n");
 
     //parser is not thread safe, so we have to lock the process right here. 
     //=====================================================
@@ -300,6 +330,7 @@ int serve_http(int connFd, char* rootFol) {
 
     }
 
+    // else if ((strcasecmp(req->http_version, "HTTP/1.1") == 0) || (strcasecmp(req->http_version, "HTTP/1.0") == 0)) {
     else if (strcasecmp(req->http_version, "HTTP/1.1") == 0) {
 
         printf("method: %s\n", req->http_method);
@@ -310,13 +341,14 @@ int serve_http(int connFd, char* rootFol) {
         printf("rootFol: %s\n", rootFol);
 
         for(int i = 0; i < req->header_count; i++){
-            if ((strcmp(req->headers[i].header_name, "Connection") == 0)||(strcmp(req->headers[i].header_name, "connection") == 0)){
-                if (strcmp(req->headers[i].header_value, "keep-alive") == 0){
-                    persistantCheck = PERSISTENT;
+
+            if (strcmp(req->headers[i].header_name, "Connection") == 0){
+                if (strcmp(req->headers[i].header_value, "keep-alive") != 0){
+                    persistantCheck = CLOSE;
                     break;
                 }
-            }
-            
+            } 
+
         }
 
         if (strcasecmp(req->http_method, "GET") == 0) {
@@ -377,10 +409,11 @@ int serve_http(int connFd, char* rootFol) {
 void* conn_handler(struct survival_bag* req) {
 
     printf("*calling conn_handler*\n");
-    
+
     while(serve_http(req->connFd, root) == PERSISTENT){
         
-    }   
+    }  
+
     close(req->connFd);
     return NULL; 
 
@@ -407,8 +440,6 @@ void* runThread(void *args){
 
 } 
  
-int poll(struct pollfd *fds, nfds_t nfds, int timeout);
- 
 int main(int argc, char* argv[]) {
 
     pthread_mutex_init(&queue_mutex, NULL);
@@ -424,11 +455,12 @@ int main(int argc, char* argv[]) {
         {"root", required_argument, NULL, 'r'}, 
         {"numThreads", required_argument, NULL, 'n'}, 
         {"timeout", required_argument, NULL, 't'}, 
+        {"cgiHandler", required_argument, NULL, 'c'},
         {NULL, 0, NULL, 0}
     };
 
     int ch;
-    while ((ch = getopt_long(argc, argv, "p:r:n:t:", long_ops, NULL)) != -1){
+    while ((ch = getopt_long(argc, argv, "p:r:n:t:c:", long_ops, NULL)) != -1){
 
         switch (ch)
 
@@ -456,6 +488,10 @@ int main(int argc, char* argv[]) {
                 timeout = optarg;
                 break;
 
+            case 'c':
+                printf("cgi program: %s\n", optarg);
+                cgi = optarg;
+                break;
         }
   
     }
@@ -484,7 +520,6 @@ int main(int argc, char* argv[]) {
 
         struct sockaddr_storage clientAddr;
         socklen_t clientLen = sizeof(struct sockaddr_storage);
-        pthread_t threadInfo;
 
         int connFd = accept(listenFd, (SA *) &clientAddr, &clientLen);
 
@@ -516,19 +551,19 @@ int main(int argc, char* argv[]) {
         pthread_mutex_unlock(&queue_mutex);
         pthread_cond_signal(&cond_var);
 
-        for (int i = 0; i < num_thread; i++) {
+    }
 
-            if (pthread_join(thread_pool[i], NULL) != 0) {
-                perror("Failed to join the thread");
-            }
+    for (int i = 0; i < num_thread; i++) {
 
+        if (pthread_join(thread_pool[i], NULL) != 0) {
+            perror("Failed to join the thread");
         }
 
-        pthread_mutex_destroy(&queue_mutex);
-        pthread_mutex_destroy(&parse_mutex);
-        pthread_cond_destroy(&cond_var);
-
     }
+
+    pthread_mutex_destroy(&queue_mutex);
+    pthread_mutex_destroy(&parse_mutex);
+    pthread_cond_destroy(&cond_var);
 
     return 0;
 
@@ -545,6 +580,8 @@ MILESTONE 2
 
 MILESTONE 3
 
+- CGI Handler: Get Long Opt (get input part)
+
 */
 
 //=====================================================================================
@@ -552,8 +589,9 @@ MILESTONE 3
 /*
 Bugs:
 
-* everything meh :|
-* curl: (52) Empty reply from server
+* it only runs one request and it didn't run others after then. 
+
+//calling exit() in sigInt handler is a SIN ; MUST NOT DO; better put things into a queue, change flag
 
 */
 
