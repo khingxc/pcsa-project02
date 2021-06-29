@@ -129,7 +129,7 @@ char* getFile(char* req_obj){   //get the real file (incase there is a / comes);
 
 }
 
-void getHeader(int fd, int connFd, char* req_obj){ //get header
+void getHeader(int fd, int connFd, char* req_obj, char* connection){ //get header
 
     struct stat st;
     fstat(fd, &st);
@@ -165,16 +165,16 @@ void getHeader(int fd, int connFd, char* req_obj){ //get header
             "HTTP/1.1 200 OK\r\n"
             "Date: %s \r\n"
             "Server: ICWS\r\n"
-            "Connection: close\r\n"
+            "Connection: %s\r\n"
             "Content-length: %lu\r\n"
             "Content-type: %s\r\n"
-            "Last-Modified: %s\r\n\r\n", date(), filesize, mimeT(file), ctime(&st.st_mtime), mimeT(req_obj));
+            "Last-Modified: %s\r\n\r\n", date(), connection, filesize, mimeT(file), ctime(&st.st_mtime), mimeT(req_obj));
 
     write_all(connFd, headr, strlen(headr));
 
 }
 
-void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
+void respond_get(int connFd, char* rootFol, char* req_obj, char* connection) { //running get
 
     char* fileLocation = fileLoc(rootFol, req_obj);
     printf("fileLoc from respond_get: %s\n", fileLocation);
@@ -194,7 +194,7 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
     printf("fd: %d\n", fd);
     printf("connFd: %d\n", connFd);
     printf("file: %s\n", file);
-    getHeader(fd, connFd, file);
+    getHeader(fd, connFd, file, connection);
 
     char buf[st.st_size];
 
@@ -211,7 +211,7 @@ void respond_get(int connFd, char* rootFol, char* req_obj) { //running get
 
 }
 
-void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
+void respond_head(int connFd, char* rootFol, char* req_obj, char* connection){ //running head
 
     char* fileLocation = fileLoc(rootFol, req_obj);
     int fd = open(fileLocation, O_RDONLY);
@@ -221,7 +221,7 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
     fstat(fd, &st);
     char buf[st.st_size];
 
-    getHeader(fd, connFd, file);
+    getHeader(fd, connFd, file, connection);
 
     write_all(connFd, buf, strlen(buf));
 
@@ -230,23 +230,6 @@ void respond_head(int connFd, char* rootFol, char* req_obj){ //running head
     }   
 
 }
-
-// void respond_post(int connFd, char* rootFol, char* req_obj){
-
-// /*
-//    The POST method is used to request the script perform processing and
-//    produce a document based on the data in the request message-body, in
-//    addition to meta-variable values.  A common use is form submission in
-//    HTML [18], intended to initiate processing by the script that has a
-//    permanent affect, such a change in a database.
-
-//    The script MUST check the value of the CONTENT_LENGTH variable before
-//    reading the attached message-body, and SHOULD check the CONTENT_TYPE
-//    value before processing it.
-// */
-
-
-// }
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
@@ -262,6 +245,7 @@ int serve_http(int connFd, char* rootFol) {
     char headr[MAXBUF];
     char lastFour[5];
     int readLine;
+    char* connection;
 
     struct pollfd fds[1];
     int timeOut, pret;
@@ -274,14 +258,15 @@ int serve_http(int connFd, char* rootFol) {
     pret = poll(fds, 1, timeOut);
 
     if (pret == 0){
+        persistantCheck = CLOSE;
+        connection = "close";
         sprintf(headr, 
                 "HTTP/1.1 408 Request Timeout Error\r\n"
                 "Date: %s \r\n"
                 "Server: ICWS\r\n"
-                "Connection: close\r\n\r\n", date());
+                "Connection: %s\r\n\r\n", date(), connection);
 
         write_all(connFd, headr, strlen(headr));
-        persistantCheck = CLOSE;
     }
 
     else{
@@ -316,12 +301,14 @@ int serve_http(int connFd, char* rootFol) {
     
     if (req == NULL){
 
+        persistantCheck = CLOSE;
+        connection = "close";
         printf("LOG: Failling to parse a request");
         sprintf(headr, 
                 "HTTP/1.1 400 Request Parsing Failed\r\n"
                 "Date: %s \r\n"
                 "Server: ICWS\r\n"
-                "Connection: close\r\n\r\n", date());
+                "Connection: %s\r\n\r\n", date(), connection);
 
         write_all(connFd, headr, strlen(headr));
         memset(buffer, '\0', MAXBUF);
@@ -340,39 +327,46 @@ int serve_http(int connFd, char* rootFol) {
         printf("connFd: %d\n", connFd);
         printf("rootFol: %s\n", rootFol);
 
+        connection = "keep-alive";
+
         for(int i = 0; i < req->header_count; i++){
 
-            if (strcmp(req->headers[i].header_name, "Connection") == 0){
+            if (strcasecmp(req->headers[i].header_name, "Connection") == 0){
                 if (strcmp(req->headers[i].header_value, "keep-alive") != 0){
+                    printf("**connection is closed**");
                     persistantCheck = CLOSE;
+                    connection = "close";
                     break;
                 }
             } 
 
         }
 
+
         if (strcasecmp(req->http_method, "GET") == 0) {
 
             printf("LOG: Running via GET method\n");
-            respond_get(connFd, rootFol, req->http_uri);
+            respond_get(connFd, rootFol, req->http_uri, strdup(connection));
 
         }
 
         else if (strcasecmp(req->http_method, "HEAD") == 0) {
 
             printf("LOG: Running via HEAD method\n");
-            respond_head(connFd, rootFol, req->http_uri);
+            respond_head(connFd, rootFol, req->http_uri, strdup(connection));
 
         }
 
         else {
 
+            persistantCheck = CLOSE;
+            connection = "close";
             printf("LOG: Unknown request\n");
             sprintf(headr, 
                     "HTTP/1.1 501 Method Unimplemented\r\n"
                     "Date: %s\r\n"
                     "Server: ICWS\r\n"
-                    "Connection: close\r\n", date());
+                    "Connection: %s\r\n", date(), connection);
             write_all(connFd, headr, strlen(headr));
         
         }
@@ -381,11 +375,13 @@ int serve_http(int connFd, char* rootFol) {
 
     else{
 
+        persistantCheck = CLOSE;
+        connection = "close";
         printf("LOG: Unsupported HTTP Version\n");
         sprintf(headr, 
                 "HTTP/1.1 505 HTTP Version Not Supported\r\n"
                 "Server: ICWS\r\n"
-                "Connection: close\r\n");
+                "Connection: %s\r\n", connection);
         write_all(connFd, headr, strlen(headr));
         free(req->headers);
         free(req);
