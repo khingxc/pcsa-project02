@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,11 +27,30 @@
 
 //============================
 
+//define for CGI
+
+static char *inferiorCmd = "./pipe-demo/chatty_cli.py";
+
+//============================
+
+
 char *port;
 char *root;
 char *numThreads;
 char *timeout;
 char *cgi;
+
+char* acpt;
+char* referer;
+char* acpt_encoding;
+char* acpt_lang;
+char* acpt_chrset;
+char* host;
+char* cookie;
+char* usr_agent;
+char* cont;
+char* cont_length;
+unsigned char* remote_addr;
 
 //================
 
@@ -194,6 +215,7 @@ void respond_get(int connFd, char* rootFol, char* req_obj, char* connection) { /
     printf("fd: %d\n", fd);
     printf("connFd: %d\n", connFd);
     printf("file: %s\n", file);
+    // if ()
     getHeader(fd, connFd, file, connection);
 
     char buf[st.st_size];
@@ -233,11 +255,170 @@ void respond_head(int connFd, char* rootFol, char* req_obj, char* connection){ /
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
+void fail_exit(char *msg) { fprintf(stderr, "%s\n", msg); exit(-1); }
+
+int piper(int connFd, char* rootFol, char* buffer, char* connection) {
+
+    int c2pFds[2]; /* Child to parent pipe */
+    int p2cFds[2]; /* Parent to child pipe */
+
+    if (pipe(c2pFds) < 0) fail_exit("c2p pipe failed.");
+    if (pipe(p2cFds) < 0) fail_exit("p2c pipe failed.");
+
+    int pid = fork();
+
+    if (pid < 0) fail_exit("Fork failed.");
+    if (pid == 0) { /* Child - set up the conduit & run inferior cmd */
+
+        pthread_mutex_lock(&parse_mutex);
+        Request *req = parse(buffer, MAXBUF, connFd);  
+        pthread_mutex_unlock(&parse_mutex); 
+
+        // for content length and type
+        char* fileLocation = fileLoc(rootFol, req->http_uri);
+        char* file = getFile(req->http_uri);
+        char* path_info = strtok(req->http_uri, "?");
+        char* query_str = req->http_uri;
+        char* final_query_str;
+        while(query_str != NULL){
+            final_query_str = query_str;
+            query_str = strtok(NULL, "?");
+    
+        }
+
+        int fd = open(fileLocation, O_RDONLY);
+        struct stat st;
+        fstat(fd, &st);
+        size_t filesize = st.st_size;
+        int fSize = filesize;
+        char* ext = mimeT(fileLocation);
+
+        setenv("GATEWAY_INTERFACE", "CGI/1.1", 1);
+        setenv("PATH_INFO", path_info, 1);
+        setenv("QUERY_STRING", final_query_str, 1);
+        // printf("remote_addr: %d %d %d %d\n", remote_addr[0], remote_addr[1], remote_addr[2], remote_addr[3]);
+        setenv("REMOTE_ADDR", remote_addr, 1);
+        // printf("request med: %s\n", req->http_method);
+        setenv("REQUEST_METHOD", req->http_method, 1);
+        // printf("request uri: %s\n", req->http_uri);
+        setenv("REQUEST_URI", req->http_uri, 1);
+        // printf("script name: %s\n", cgi);
+        setenv("SCRIPT_NAME", cgi, 1);
+        // printf("server port: %s\n", port);
+        setenv("SERVER_PORT", port, 1);   //**please check the type needed**
+        setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
+        setenv("SERVER_SOFTWARE", "KHINGXC_SERVER", 1);
+        setenv("HTTP_CONNECTION", connection, 1);
+        // printf("HTTP connection: %s\n", connection, 1);
+        if (strcasecmp(ext, "null") != 0){
+            setenv("CONTENT_TYPE", ext, 1);
+        }
+        // printf("req header counts: %d\n", req->header_count);
+
+        for(int i = 0; i < req->header_count; i++){
+
+            if (strcmp(req->headers[i].header_name, "CONTENT_LENGTH") == 0){
+                setenv("CONTENT_LENGTH", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Accept") == 0){
+                setenv("HTTP_ACCEPT", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Referer") == 0){
+                setenv("HTTP_REFERER", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Accept-Encoding") == 0){
+                setenv("HTTP_ACCEPT_ENCODING", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Accept-Language") == 0){
+                setenv("HTTP_ACCEPT_LANGUAGE", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Accept-Charset") == 0){
+                setenv("HTTP_ACCEPT_CHARSET", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Host") == 0){
+                setenv("HOST", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "Cookie") == 0){
+                setenv("HTTP_COOKIE", req->headers[i].header_value, 1);
+            }
+
+            if (strcmp(req->headers[i].header_name, "User-Agent") == 0){
+                setenv("HTTP_USER_AGENT", req->headers[i].header_value, 1);
+            }
+        }
+
+        /* Wire pipe's incoming to child's stdin */
+        /* First, close the unused direction. */
+        if (close(p2cFds[1]) < 0) fail_exit("failed to close p2c[1]");
+        if (p2cFds[0] != STDIN_FILENO) {
+            if (dup2(p2cFds[0], STDIN_FILENO) < 0)
+                fail_exit("dup2 stdin failed.");
+            if (close(p2cFds[0]) < 0)
+                fail_exit("close p2c[0] failed.");
+        }
+
+        /* Wire child's stdout to pipe's outgoing */
+        /* But first, close the unused direction */
+        if (close(c2pFds[0]) < 0) fail_exit("failed to close c2p[0]");
+        if (c2pFds[1] != STDOUT_FILENO) {
+            if (dup2(c2pFds[1], STDOUT_FILENO) < 0)
+                fail_exit("dup2 stdin failed.");
+            if (close(c2pFds[1]) < 0)
+                fail_exit("close pipeFd[0] failed.");
+        }
+
+        
+        char* inferiorArgv[] = {cgi, NULL};
+        //fixing inferiorCmd
+        if (execvpe(inferiorArgv[0], inferiorArgv, environ) < 0)
+            fail_exit("exec failed.");
+    }
+    else { /* Parent - send a random message */
+        /* Close the write direction in parent's incoming */
+        if (close(c2pFds[1]) < 0) fail_exit("failed to close c2p[1]");
+
+        /* Close the read direction in parent's outgoing */
+        if (close(p2cFds[0]) < 0) fail_exit("failed to close p2c[0]");
+
+        char *message = "OMGWTFBBQ\n";
+        /* Write a message to the child - replace with write_all as necessary */
+        write(p2cFds[1], message, strlen(message));
+        /* Close this end, done writing. */
+        if (close(p2cFds[1]) < 0) fail_exit("close p2c[01] failed.");
+
+        char buf[MAXBUF+1];
+        ssize_t numRead;
+        /* Begin reading from the child */
+        while ((numRead = read(c2pFds[0], buf, BUFSIZE))>0) {
+            printf("Parent saw %ld bytes from child...\n", numRead);
+            // printf("Parent saw %ld bytes from child...\n", numRead);
+            // buf[numRead] = '\x0'; /* Printing hack; won't work with binary data */
+            write_all(connFd, buf, strlen(buf));
+            // printf("-------\n");
+            // printf("%s", buf);
+            // printf("-------\n");
+        }
+        /* Close this end, done reading. */
+        if (close(c2pFds[0]) < 0) fail_exit("close c2p[01] failed.");
+
+        /* Wait for child termination & reap */
+        int status;
+
+        if (waitpid(pid, &status, 0) < 0) fail_exit("waitpid failed.");
+        printf("Child exited... parent's terminating as well.\n");
+    }
+}
+
 int serve_http(int connFd, char* rootFol) {
 
     int persistantCheck = PERSISTENT;
-
-    printf("**calling serve_http**\n");
 
     char buffer[MAXBUF];
     memset(buffer, '\0', 8192);
@@ -271,16 +452,11 @@ int serve_http(int connFd, char* rootFol) {
 
     else{
 
-    printf("before read while loop\n");
     while ((readLine = read(connFd, line, 8192)) > 0){
-
-        printf("in while loop\n");
 
         strcat(buffer, line);
         memset(lastFour, '\0', 5);
         strncpy(lastFour, &buffer[strlen(buffer)-4], 4);
-
-        printf("line: %s\n", line);
         
         if ((strcmp(lastFour, "\r\n\r\n") == 0) || (strcmp(line, "\r\n") == 0)){     
             break;
@@ -289,8 +465,6 @@ int serve_http(int connFd, char* rootFol) {
         memset(line, '\0', MAXBUF);
 
     }
-
-    printf("done reading, before mutex lock and parsing\n");
 
     //parser is not thread safe, so we have to lock the process right here. 
     //=====================================================
@@ -317,15 +491,14 @@ int serve_http(int connFd, char* rootFol) {
 
     }
 
-    // else if ((strcasecmp(req->http_version, "HTTP/1.1") == 0) || (strcasecmp(req->http_version, "HTTP/1.0") == 0)) {
     else if (strcasecmp(req->http_version, "HTTP/1.1") == 0) {
 
-        printf("method: %s\n", req->http_method);
-        printf("version: %s\n", req->http_version);
-        printf("uri: %s\n", req->http_uri);
+        // printf("method: %s\n", req->http_method);
+        // printf("version: %s\n", req->http_version);
+        // printf("uri: %s\n", req->http_uri);
 
-        printf("connFd: %d\n", connFd);
-        printf("rootFol: %s\n", rootFol);
+        // printf("connFd: %d\n", connFd);
+        // printf("rootFol: %s\n", rootFol);
 
         connection = "keep-alive";
 
@@ -333,15 +506,28 @@ int serve_http(int connFd, char* rootFol) {
 
             if (strcasecmp(req->headers[i].header_name, "Connection") == 0){
                 if (strcmp(req->headers[i].header_value, "keep-alive") != 0){
-                    printf("**connection is closed**");
+                    printf("**connection is closed**\n");
                     persistantCheck = CLOSE;
                     connection = "close";
                     break;
                 }
-            } 
+            }
 
         }
 
+        //==============================================
+        char* toCheck = fileLoc(root, req->http_uri);
+
+        // if (strcasecmp(starter, "/cgi/") == 0){
+        if (strstr(toCheck, "/cgi/")){
+            if ((strcasecmp(req->http_method, "GET") == 0)||(strcasecmp(req->http_method, "HEAD") == 0)||(strcasecmp(req->http_method, "POST") == 0)){
+                piper(connFd, rootFol, buffer, connection);
+                return;
+            }
+            
+        }
+
+        printf("start checking methods\n");
 
         if (strcasecmp(req->http_method, "GET") == 0) {
 
@@ -404,8 +590,6 @@ int serve_http(int connFd, char* rootFol) {
 
 void* conn_handler(struct survival_bag* req) {
 
-    printf("*calling conn_handler*\n");
-
     while(serve_http(req->connFd, root) == PERSISTENT){
         
     }  
@@ -438,9 +622,11 @@ void* runThread(void *args){
  
 int main(int argc, char* argv[]) {
 
+    signal(SIGPIPE, SIG_IGN);
     pthread_mutex_init(&queue_mutex, NULL);
     pthread_mutex_init(&parse_mutex, NULL);
     pthread_cond_init(&cond_var, NULL);
+    
 
     //=======================================================================================
     //get values of each input; port, root, numThreads, timeout
@@ -500,9 +686,8 @@ int main(int argc, char* argv[]) {
     //=======================================================================
 
     //Thread Creation
-    for (int i = 0; i < num_thread; i++){
 
-        printf("thread %d created\n", i);
+    for (int i = 0; i < num_thread; i++){
 
         if (pthread_create(&thread_pool[i], NULL, runThread, NULL) != 0){
             printf("Creating Thread failed\n");
@@ -540,8 +725,12 @@ int main(int argc, char* argv[]) {
             printf("Connection from ?UNKNOWN?\n");
 
 
-        pthread_mutex_lock(&queue_mutex);
-        printf("lock and add request to queue\n");
+        struct sockaddr_in *sin = (struct sockaddr_in *)&clientAddr;
+        unsigned char *ip = (unsigned char *)&sin->sin_addr.s_addr;
+        // printf("%d %d %d %d\n", ip[0], ip[1], ip[2], ip[3]);
+        remote_addr = ip;
+
+        pthread_mutex_lock(&queue_mutex); 
         req_queue[req_count] = *context;
         req_count++;
         pthread_mutex_unlock(&queue_mutex);
@@ -565,35 +754,16 @@ int main(int argc, char* argv[]) {
 
 }
 
-//=====================================================================================
-
 /*
-Progress Checking Point
 
-MILESTONE 2
+=====================================================================================
 
-- persistant; check close in request
-
-MILESTONE 3
-
-- CGI Handler: Get Long Opt (get input part)
-
-*/
-
-//=====================================================================================
-
-/*
 Bugs:
 
-* it only runs one request and it didn't run others after then. 
+* M3 doesn't work; getting exec failed, Child exited... parent's terminating as well.
 
-//calling exit() in sigInt handler is a SIN ; MUST NOT DO; better put things into a queue, change flag
+=====================================================================================
 
-*/
-
-//=====================================================================================
-
-/*
 References
 
 * https://www.techiedelight.com/print-current-date-and-time-in-c/
@@ -602,7 +772,13 @@ References
 * https://code-vault.net/lesson/j62v2novkv:1609958966824 
 * https://www.youtube.com/watch?v=UP6B324Qh5k&t=2s
 
+=====================================================================================
+
+Collaborators
+
+* Maylin Catherine Cerf 6180039
+* Thanthong Chim-Ong 6280026
+
+=====================================================================================
 
 */
-
-//=====================================================================================
